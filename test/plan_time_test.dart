@@ -92,13 +92,15 @@ void main() {
     await t.pumpAndSettle();
     final wheels = find.byType(ListWheelScrollView);
     final hours = t.widget<ListWheelScrollView>(wheels.first).controller as FixedExtentScrollController;
-    hours.jumpToItem(30); // tomorrow
+    // 24 slots on: the same hour tomorrow, whatever the time the test runs
+    // at (30 would be the day after from 18:00 on).
+    hours.jumpToItem(24);
     await t.pumpAndSettle();
     expect(find.text('Domani'), findsOneWidget);
     await t.tap(find.text('Imposta'));
     await t.pumpAndSettle();
     final now = DateTime.now();
     expect(got!.arriveBy, isTrue);
-    expect(got!.time!.isAfter(now.add(const Duration(hours: 29))), isTrue);
+    expect(got!.time!.isAfter(now.add(const Duration(hours: 23))), isTrue);
   });
 }

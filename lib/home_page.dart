@@ -2096,6 +2096,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               trackCameraPosition: true,
               onMapLongClick: _onMapLongPress,
               myLocationEnabled: locationGranted,
+              // Which way the phone faces: MapLibre's own heading marker on
+              // the location dot (Android, iOS; nothing on web).
+              myLocationRenderMode: locationGranted && !kIsWeb ? MyLocationRenderMode.compass : MyLocationRenderMode.normal,
               // On web the platform source is MapLibre's GeolocateControl, which
               // brings its own button; feed it Geolocator's fixes instead.
               locationSource: kIsWeb ? const ManualLocationSource() : const PlatformLocationSource(),

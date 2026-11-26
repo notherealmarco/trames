@@ -1638,6 +1638,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     HapticFeedback.mediumImpact();
     // Routes need room: lift the sheet if it was lowered to just the search bar.
     if (sheetValue == M3EBottomSheetValue.preview) sheet.animateTo(M3EBottomSheetValue.collapsed);
+    // A line on screen would hide the journeys: leave it.
+    if (line != null) _closeLine();
     _deselect();
     setState(() => to = p);
     toSearch.text = p.name;

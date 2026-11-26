@@ -174,5 +174,10 @@
   "settingsServerUnreachable": "{name} non risponde a questo indirizzo",
   "settingsServersSaved": "Server salvati",
   "moreJourneys": "{count, plural, =1{1 altro percorso} other{{count} altri percorsi}}",
-  "hiddenJourneyReason": "{changes, plural, =1{Restando sul {line} arrivi alle {time}, con 1 cambio in meno} other{Restando sul {line} arrivi alle {time}, con {changes} cambi in meno}}"
+  "hiddenJourneyReason": "{changes, plural, =1{Restando sul {line} arrivi alle {time}, con 1 cambio in meno} other{Restando sul {line} arrivi alle {time}, con {changes} cambi in meno}}",
+  "stopNumber": "Fermata {code}",
+  "directions": "Indicazioni",
+  "distanceMeters": "{meters} m",
+  "distanceKm": "{km} km",
+  "decimalSeparator": ","
 }

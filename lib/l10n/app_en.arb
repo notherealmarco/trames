@@ -214,5 +214,13 @@
   "moreJourneys": "{count, plural, =1{1 more journey} other{{count} more journeys}}",
   "@moreJourneys": {"placeholders": {"count": {"type": "int"}}},
   "hiddenJourneyReason": "{changes, plural, =1{Stay on the {line}: arrive {time} with 1 change fewer} other{Stay on the {line}: arrive {time} with {changes} fewer changes}}",
-  "@hiddenJourneyReason": {"description": "Why a journey is under 'more journeys': staying on one of its buses.", "placeholders": {"line": {"type": "String"}, "time": {"type": "String"}, "changes": {"type": "int"}}}
+  "@hiddenJourneyReason": {"description": "Why a journey is under 'more journeys': staying on one of its buses.", "placeholders": {"line": {"type": "String"}, "time": {"type": "String"}, "changes": {"type": "int"}}},
+  "stopNumber": "Stop {code}",
+  "@stopNumber": {"placeholders": {"code": {"type": "String"}}},
+  "directions": "Directions",
+  "distanceMeters": "{meters} m",
+  "@distanceMeters": {"placeholders": {"meters": {"type": "int"}}},
+  "distanceKm": "{km} km",
+  "@distanceKm": {"placeholders": {"km": {"type": "String"}}},
+  "decimalSeparator": "."
 }

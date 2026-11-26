@@ -12,6 +12,9 @@ class LineState {
   final String name;
   final String mode;
 
+  /// The line in Tramite (e.g. "it-Lazio-Rome_85"), when it has it.
+  String? lineId;
+
   /// Trip shown (route + stops); one per direction, see [directions].
   String? tripId;
   TripInfo? trip;

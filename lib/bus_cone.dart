@@ -30,3 +30,22 @@ Future<Uint8List> busConeImage(Color color, {double pixelRatio = 3}) async {
   image.dispose();
   return png!.buffer.asUint8List();
 }
+
+/// Diameter of a browsed bus's badge (circle with its line), logical px.
+const kBusBadgeSize = 26.0;
+
+/// PNG of a browsed bus's badge without its line: a [color] disc with a
+/// white ring. The map writes the line on it, and hides the whole badge
+/// where it would overlap another one (a small dot is left there).
+Future<Uint8List> busBadgeImage(Color color, {double pixelRatio = 3}) async {
+  const size = kBusBadgeSize, r = size / 2, ring = 2.0;
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder)..scale(pixelRatio);
+  canvas.drawCircle(const Offset(r, r), r, Paint()..color = const Color(0xFFFFFFFF));
+  canvas.drawCircle(const Offset(r, r), r - ring, Paint()..color = color);
+  final px = (size * pixelRatio).round();
+  final image = await recorder.endRecording().toImage(px, px);
+  final png = await image.toByteData(format: ui.ImageByteFormat.png);
+  image.dispose();
+  return png!.buffer.asUint8List();
+}

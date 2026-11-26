@@ -19,7 +19,6 @@ import 'backend/route_search.dart';
 import 'backend/trip_variants.dart';
 import 'area_buses.dart';
 import 'attribution.dart';
-import 'bus_clusters.dart';
 import 'bus_cone.dart';
 import 'favorites.dart';
 import 'l10n.dart';
@@ -52,6 +51,12 @@ const _kCornerSpace = 140.0;
 
 /// Below this zoom the map shows no stops and the sheet only the search bar.
 const kMinStopsZoom = 14.0;
+
+/// A stop farther than this from you offers Directions to it.
+const kStopDirectionsMeters = 150.0;
+
+/// Room a floating button takes at the bottom of the sheet (56 + margin).
+const kFabRoom = 72.0;
 
 /// From this zoom up, stop names are drawn next to the pins.
 const kStopNamesZoom = 16.0;
@@ -341,6 +346,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   /// Tapped stop: departures from this stop only.
   Stop? filterStop;
+
+  /// How to bring back each view the one on screen was opened from, last
+  /// on top (see [_leaving], [_goBack]).
+  final List<VoidCallback> _backStack = [];
+
+  /// The stop view's floating Directions: icon only while scrolling down
+  /// the departures, label back on scrolling up or at the top.
+  final _directionsFab = M3EExtendedFabController();
+  bool _restoring = false;
   Timer? idleDebounce;
 
   /// Line view (a line's route, stops and live buses), when open.
@@ -420,20 +434,23 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   /// Every stop seen on the map so far, by id: where buses are heading.
   final Map<String, LatLng> _stopPositions = {};
 
-  /// Heading cone images already on the map, by image name (one per color).
-  final Set<String> _coneImages = {};
+  /// Bus images already on the map (heading cones, badges), by image name
+  /// (one of each per color).
+  final Set<String> _busImages = {};
 
   Future<void> _drawBuses(String source, Map<String, dynamic> g) async {
     final m = map;
     if (m == null || !styleReady) return;
     for (final f in (g['features'] as List).cast<Map<String, dynamic>>()) {
       final props = f['properties'] as Map<String, dynamic>;
-      final name = props['cone'] as String?;
-      if (name == null || !_coneImages.add(name)) continue;
-      try {
-        await m.addImage(name, await busConeImage(hexColor(props['color'] as String)), false, 3);
-      } catch (_) {
-        _coneImages.remove(name); // try again next frame
+      for (final (key, draw) in [('cone', busConeImage), ('badge', busBadgeImage)]) {
+        final name = props[key] as String?;
+        if (name == null || !_busImages.add(name)) continue;
+        try {
+          await m.addImage(name, await draw(hexColor(props['color'] as String)), false, 3);
+        } catch (_) {
+          _busImages.remove(name); // try again next frame
+        }
       }
     }
     await m.setGeoJsonSource(source, g);
@@ -528,6 +545,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    _directionsFab.dispose();
     refreshTimer?.cancel();
     clock?.cancel();
     _positions?.cancel();
@@ -701,7 +719,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     final camera = m.cameraPosition;
     final zoom = camera?.zoom ?? 15;
 
-    if (zoom < kMinStopsZoom) {
+    final far = zoom < kMinStopsZoom;
+    if (far && filterStop == null) {
       // Only the search bar is left: drop the sheet to its lowest height
       // (dragging is disabled while in this state, see build()).
       if (!zoomedOut) sheet.animateTo(M3EBottomSheetValue.preview);
@@ -732,7 +751,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     try {
       final area = await _visibleArea(m);
       final reference = areaMode ? center : home;
-      final stops = await backend.stops.stopsInArea(area, from: reference);
+      // Zoomed out on a stop: just its departures, no pins for the area.
+      final stops = far ? <Stop>[] : await backend.stops.stopsInArea(area, from: reference);
       if (seq != _areaSeq || !mounted) return;
       final pins = stops.take(kMaxStopPins).toList();
       final boardStops = filterStop != null ? [filterStop!] : pins.take(kMaxBoardStops).toList();
@@ -811,14 +831,73 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  void _filterTo(Stop stop) {
+  /// The stop view: [stop]'s departures, the search bar out of the way.
+  /// Opened the same way from the map, a line or search; back returns to
+  /// where it was opened from (see [_goBack]).
+  void _openStop(Stop stop, {bool moveCamera = false}) {
+    _leaving(_View.stop);
     HapticFeedback.selectionClick();
+    _directionsFab.expand();
     setState(() {
       filterStop = stop;
       nearby = [];
     });
+    if (line != null) _closeLine();
+    if (to != null) _clearDestination();
+    if (sheetValue == M3EBottomSheetValue.preview) sheet.animateTo(M3EBottomSheetValue.collapsed);
     _drawNearbyStops();
+    // Moving there triggers the area reload, which honours the stop; load
+    // right away too in case the camera is already there (no move, no idle).
+    if (moveCamera) map?.animateCamera(CameraUpdate.newLatLngZoom(stop.position, 17));
     _refreshArea();
+  }
+
+  _View get _view => line != null
+      ? _View.line
+      : to != null
+          ? _View.journeys
+          : filterStop != null
+              ? _View.stop
+              : _View.browse;
+
+  /// About to open a [next] view: remember how to bring back the one on
+  /// screen, for [_goBack]. From the plain map there's nothing to remember
+  /// (back closes to it anyway), so the history starts over there.
+  void _leaving(_View next) {
+    if (_restoring) return;
+    final now = _view;
+    if (now == next) return; // a view replacing one of its kind
+    switch (now) {
+      case _View.browse:
+        _backStack.clear();
+      case _View.stop:
+        final stop = filterStop!;
+        _backStack.add(() => _openStop(stop, moveCamera: true));
+      case _View.journeys:
+        final dest = to!;
+        _backStack.add(() => _setDestination(dest));
+      case _View.line:
+        final l = line!;
+        final name = l.name, mode = l.mode, tripId = l.tripId, lineId = l.lineId;
+        final hint = tripId == null ? null : l.runHints[tripId];
+        _backStack.add(() => _openLine(name: name, mode: mode, tripId: tripId, lineId: lineId, hint: hint));
+    }
+  }
+
+  /// Back (arrow or gesture): a journey's details go back to the list;
+  /// any other view closes and the one it was opened from comes back.
+  void _goBack() {
+    if (selected != null) return _deselect();
+    final restore = _backStack.isEmpty ? null : _backStack.removeLast();
+    _restoring = true;
+    try {
+      if (line != null) _closeLine();
+      if (to != null) _clearDestination();
+      if (filterStop != null) _clearFilter();
+      restore?.call();
+    } finally {
+      _restoring = false;
+    }
   }
 
   void _clearFilter() {
@@ -950,12 +1029,17 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   Future<void> _openLine({required String name, required String mode, String? tripId, String? lineId, RunHint? hint}) async {
     final trips = backend.trips;
     if (trips == null) return;
+    _leaving(_View.line);
     HapticFeedback.selectionClick();
     if (selected != null) _deselect();
     if (to != null) _clearDestination();
     final state = LineState(name, mode)..tripId = tripId;
     if (tripId != null && hint != null) state.runHints[tripId] = hint;
-    setState(() => line = state);
+    setState(() {
+      line = state;
+      filterStop = null;
+      nearby = [];
+    });
     if (sheetValue == M3EBottomSheetValue.preview) sheet.animateTo(M3EBottomSheetValue.collapsed);
     _drawNearbyStops();
     _leaveBrowsing();
@@ -965,7 +1049,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (showsTripNumber(tripId)) return;
 
     final prefix = lineId == null ? tramite.prefixOf(tripId) : null;
-    final id = lineId ?? (prefix == null ? null : TramiteClient.lineId(prefix, name));
+    final id = state.lineId = lineId ?? (prefix == null ? null : TramiteClient.lineId(prefix, name));
     if (id == null) {
       if (tripId == null) setState(() => state.error = context.l10n.errorNoLiveBusesForLine);
       return;
@@ -1054,25 +1138,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  /// A tapped bubble of overlapping buses: zoom in on them until they
-  /// stand apart. Its buses are the ones drawn around the tap (the bubble
-  /// sits among them), within twice the cluster radius on screen.
-  Future<void> _zoomIntoCluster(LatLng at) async {
-    final m = map;
-    if (m == null) return;
-    final zoom = m.cameraPosition?.zoom ?? AreaBuses.minZoom;
-    final reach = 2 * kBusClusterRadiusPx * metersPerPixel(zoom, at.latitude);
-    final members = [
-      for (final b in areaBuses.tracker.buses.values)
-        if (distanceMeters(b.drawn, at) <= reach) b.drawn,
-    ];
-    if (members.isEmpty) return;
-    final size = MediaQuery.sizeOf(context);
-    final t = clusterZoomTarget(members, zoom: zoom, viewPx: (width: size.width, height: size.height / 2));
-    HapticFeedback.selectionClick();
-    await m.animateCamera(CameraUpdate.newLatLngZoom(t.center, t.zoom));
-  }
-
   /// A map long press: on a bus, you're riding it ([_board]); elsewhere,
   /// a dropped pin to go to.
   Future<void> _onMapLongPress(math.Point<double> point, LatLng ll) async {
@@ -1082,7 +1147,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         // A finger is bigger than a bus dot: a box around the press.
         final hits = await m.queryRenderedFeaturesInRect(
             Rect.fromCenter(center: Offset(point.x, point.y), width: 36, height: 36),
-            ['area-buses-circle', 'buses-circle'],
+            ['area-buses-badge', 'area-buses-dot', 'buses-circle'],
             null);
         for (final f in hits) {
           final id = '${(f as Map)['properties']?['id'] ?? f['id']}';
@@ -1206,33 +1271,45 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         'line-stops',
         _collection([
           if (t != null)
-            for (final st in t.stops) _point(st.position, {'color': color, 'name': titleCase(st.name)}),
+            for (final (i, st) in t.stops.indexed)
+              {..._point(st.position, {'color': color, 'name': titleCase(st.name)}), 'id': '$i'},
         ]));
+  }
+
+  /// A stop of the line on screen, tapped on the map or in the sheet: its
+  /// departures. One the backend gave no id for can only be shown.
+  void _openLineStop(TripStop stop) {
+    final id = stop.stopId;
+    if (id == null) {
+      map?.animateCamera(CameraUpdate.newLatLngZoom(stop.position, 16.5));
+      return;
+    }
+    _openStop(
+      Stop(
+        id: id,
+        name: titleCase(stop.name),
+        position: stop.position,
+        distanceMeters: here == null ? 0 : distanceMeters(here!, stop.position).round(),
+      ),
+      moveCamera: true,
+    );
   }
 
   /// Search result "timetable" button: show that stop's departures, like
   /// tapping its pin.
   void _openStopTimetable(Place p) {
-    if (line != null) _closeLine();
-    if (to != null) _clearDestination();
-    final stop = Stop(
-      id: p.stopId!,
-      name: p.name,
-      position: p.position,
-      distanceMeters: here == null ? 0 : distanceMeters(here!, p.position).round(),
-      // Metro / rail stations show all platforms (Termini: A + B); a bus or
-      // tram stop shows just this pole, i.e. one direction.
-      station: p.station,
+    _openStop(
+      Stop(
+        id: p.stopId!,
+        name: p.name,
+        position: p.position,
+        distanceMeters: here == null ? 0 : distanceMeters(here!, p.position).round(),
+        // Metro / rail stations show all platforms (Termini: A + B); a bus or
+        // tram stop shows just this pole, i.e. one direction.
+        station: p.station,
+      ),
+      moveCamera: true,
     );
-    setState(() {
-      filterStop = stop;
-      nearby = [];
-    });
-    if (sheetValue == M3EBottomSheetValue.preview) sheet.animateTo(M3EBottomSheetValue.collapsed);
-    // Moving there triggers the area reload, which honours the filter; load
-    // right away too in case the camera is already there (no move, no idle).
-    map?.animateCamera(CameraUpdate.newLatLngZoom(p.position, 17));
-    _refreshArea();
   }
 
   /// Picks the configured city around [p] (or none: Transitous only) and
@@ -1256,12 +1333,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     for (final id in ['line', 'line-stops', 'approach', 'route', 'via', 'stops', 'endpoints', 'buses']) {
       await m.addGeoJsonSource(id, empty);
     }
-    // Feature id = vehicle id: a tapped bus opens its trip. Buses that
-    // overlap merge into a bubble with their count (see kBusClusterRadiusPx).
-    await m.addSource(
-        'area-buses',
-        const GeojsonSourceProperties(
-            data: empty, promoteId: 'id', cluster: true, clusterRadius: kBusClusterRadiusPx));
+    // Feature id = vehicle id: a tapped bus opens its trip.
+    await m.addSource('area-buses', const GeojsonSourceProperties(data: empty, promoteId: 'id'));
     // Stop pins: tappable (filters departures to that stop); the selected one
     // is bigger.
     await m.addCircleLayer('nearby', 'nearby-circle',
@@ -1272,32 +1345,20 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           circleStrokeWidth: ['case', ['get', 'selected'], 3, 2],
         ),
         minzoom: kMinStopsZoom);
-    // Stop names once zoomed in enough.
-    await m.addSymbolLayer('nearby', 'nearby-label',
-        SymbolLayerProperties(
-          textField: ['get', 'name'],
-          textFont: ['Noto Sans Regular'],
-          textSize: 12,
-          textColor: labelColor,
-          textHaloColor: haloColor,
-          textHaloWidth: 1.5,
-          textAnchor: 'top',
-          textOffset: [0, 0.9],
-          textOptional: true,
-        ),
-        minzoom: kStopNamesZoom);
     m.onFeatureTapped.add((_, latLng, id, layerId, _) {
-      if (layerId == 'area-buses-circle' || layerId == 'area-buses-label') {
+      if (layerId == 'area-buses-badge' || layerId == 'area-buses-dot') {
         _openBus(id);
         return;
       }
-      if (layerId == 'area-buses-cluster' || layerId == 'area-buses-count') {
-        _zoomIntoCluster(latLng);
+      if (layerId == 'line-stops-circle' || layerId == 'line-stops-label') {
+        final stops = line?.trip?.stops;
+        final i = int.tryParse(id);
+        if (stops != null && i != null && i < stops.length) _openLineStop(stops[i]);
         return;
       }
       if (layerId != 'nearby-circle' && layerId != 'nearby-label') return;
       final stop = stopById[id];
-      if (stop != null) _filterTo(stop);
+      if (stop != null) _openStop(stop);
     });
     await m.addLineLayer('route', 'route-casing',
         const LineLayerProperties(lineColor: '#FFFFFF', lineWidth: 10, lineCap: 'round', lineJoin: 'round'),
@@ -1320,8 +1381,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         belowLayerId: 'approach-line', enableInteraction: false);
     await m.addCircleLayer('line-stops', 'line-stops-circle',
         const CircleLayerProperties(
-            circleRadius: 4, circleColor: '#FFFFFF', circleStrokeColor: ['get', 'color'], circleStrokeWidth: 2.5),
-        enableInteraction: false);
+            circleRadius: 4, circleColor: '#FFFFFF', circleStrokeColor: ['get', 'color'], circleStrokeWidth: 2.5));
     await m.addSymbolLayer('line-stops', 'line-stops-label',
         SymbolLayerProperties(
           textField: ['get', 'name'],
@@ -1334,8 +1394,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           textOffset: [0.8, 0],
           textOptional: true,
         ),
-        minzoom: 15,
-        enableInteraction: false);
+        minzoom: 15);
     // A route's rides: the stops they pass on the way (names when zoomed in),
     // smaller than where you get on and off.
     await m.addCircleLayer('via', 'via-circle',
@@ -1378,63 +1437,47 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             iconAllowOverlap: true,
             iconIgnorePlacement: true,
           ),
-          filter: [
-            'all',
-            ['has', 'heading'],
-            ['!', ['has', 'point_count']],
-          ],
+          filter: ['has', 'heading'],
           minzoom: source == 'area-buses' ? AreaBuses.minZoom : null,
           enableInteraction: false);
     }
     // Browsing: every bus around, smaller than a route's or line's own.
-    await m.addCircleLayer('area-buses', 'area-buses-circle',
+    // Each is a small dot in its color, and on it a badge with its line
+    // where there's room: a badge that would overlap one already shown is
+    // hidden (moving buses go first), leaving just the dot.
+    await m.addCircleLayer('area-buses', 'area-buses-dot',
         const CircleLayerProperties(
-            circleRadius: 11, circleColor: ['get', 'color'], circleStrokeColor: '#FFFFFF', circleStrokeWidth: 2),
-        filter: ['!', ['has', 'point_count']],
+            circleRadius: 3.5, circleColor: ['get', 'color'], circleStrokeColor: '#FFFFFF', circleStrokeWidth: 1),
         minzoom: AreaBuses.minZoom);
-    await m.addSymbolLayer('area-buses', 'area-buses-label',
+    await m.addSymbolLayer('area-buses', 'area-buses-badge',
         const SymbolLayerProperties(
+          iconImage: ['get', 'badge'],
+          iconPadding: 0,
+          symbolSortKey: ['case', ['get', 'moving'], 0, 1],
           textField: ['get', 'line'],
           textFont: ['Noto Sans Bold'],
           textSize: 9,
           textColor: '#FFFFFF',
+          // The badge decides: the line on it goes wherever it goes.
           textAllowOverlap: true,
           textIgnorePlacement: true,
         ),
-        filter: ['!', ['has', 'point_count']],
         minzoom: AreaBuses.minZoom);
-    // Overlapping buses: one bubble with how many. Drawn unlike any bus (a
-    // light disc with a primary ring, over one or two more peeking out
-    // behind it, a stack) so it reads as a group.
-    for (final (id, shift, atLeast) in [('area-buses-stack2', 6.0, 3), ('area-buses-stack1', 3.0, 2)]) {
-      await m.addCircleLayer('area-buses', id,
-          CircleLayerProperties(
-            circleRadius: 14,
-            circleColor: haloColor,
-            circleStrokeColor: primary,
-            circleStrokeWidth: 2,
-            circleTranslate: [shift, -shift],
-          ),
-          filter: ['>=', ['get', 'point_count'], atLeast],
-          minzoom: AreaBuses.minZoom,
-          enableInteraction: false);
-    }
-    await m.addCircleLayer('area-buses', 'area-buses-cluster',
-        CircleLayerProperties(
-            circleRadius: 14, circleColor: haloColor, circleStrokeColor: primary, circleStrokeWidth: 3),
-        filter: ['has', 'point_count'],
-        minzoom: AreaBuses.minZoom);
-    await m.addSymbolLayer('area-buses', 'area-buses-count',
+    // Stop names once zoomed in enough. Above the browsed buses: placed
+    // first, so a bus badge that would cover a name is left as its dot.
+    await m.addSymbolLayer('nearby', 'nearby-label',
         SymbolLayerProperties(
-          textField: ['get', 'point_count_abbreviated'],
-          textFont: ['Noto Sans Bold'],
-          textSize: 13,
-          textColor: primary,
-          textAllowOverlap: true,
-          textIgnorePlacement: true,
+          textField: ['get', 'name'],
+          textFont: ['Noto Sans Regular'],
+          textSize: 12,
+          textColor: labelColor,
+          textHaloColor: haloColor,
+          textHaloWidth: 1.5,
+          textAnchor: 'top',
+          textOffset: [0, 0.9],
+          textOptional: true,
         ),
-        filter: ['has', 'point_count'],
-        minzoom: AreaBuses.minZoom);
+        minzoom: kStopNamesZoom);
     await m.addCircleLayer('buses', 'buses-circle',
         const CircleLayerProperties(
             circleRadius: 15, circleColor: ['get', 'color'], circleStrokeColor: '#FFFFFF', circleStrokeWidth: 3),
@@ -1635,13 +1678,17 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // ---------- actions ----------
 
   void _setDestination(Place p) {
+    _leaving(_View.journeys);
     HapticFeedback.mediumImpact();
     // Routes need room: lift the sheet if it was lowered to just the search bar.
     if (sheetValue == M3EBottomSheetValue.preview) sheet.animateTo(M3EBottomSheetValue.collapsed);
     // A line on screen would hide the journeys: leave it.
     if (line != null) _closeLine();
     _deselect();
-    setState(() => to = p);
+    setState(() {
+      to = p;
+      filterStop = null;
+    });
     toSearch.text = p.name;
     _drawNearbyStops();
     _drawEndpoints();
@@ -2022,11 +2069,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final cs = Theme.of(context).colorScheme;
     return PopScope(
-      canPop: selected == null && to == null && line == null,
+      canPop: selected == null && to == null && line == null && filterStop == null,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (line != null) return _closeLine();
-        selected != null ? _deselect() : _clearDestination();
+        if (!didPop) _goBack();
       },
       child: AnnotatedRegion<SystemUiOverlayStyle>(
         value: (isDark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark)
@@ -2042,7 +2087,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 map = c;
                 if (_lastFix case final f?) _showWebPuck(f); // a new map (e.g. dark mode)
                 styleReady = false;
-                _coneImages.clear(); // a new map (e.g. dark mode) has none
+                _busImages.clear(); // a new map (e.g. dark mode) has none
               },
               onStyleLoadedCallback: _onStyleLoaded,
               onCameraIdle: _onCameraIdle,
@@ -2165,14 +2210,43 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     setState(() => sheetValue = v);
                     _onSheetSettled();
                   },
-                  child: CustomScrollView(slivers: [
-                    if (selected == null && line == null) SliverToBoxAdapter(child: _searchArea()),
-                    ..._content(),
-                    SliverToBoxAdapter(child: SizedBox(height: 24 + MediaQuery.paddingOf(context).bottom)),
-                  ]),
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (n) {
+                      if (n.depth != 0) return false;
+                      _directionsFab.handleScrollNotification(n);
+                      if (n is ScrollEndNotification && n.metrics.pixels <= n.metrics.minScrollExtent) {
+                        _directionsFab.expand(); // back at the top: label again
+                      }
+                      return false;
+                    },
+                    child: CustomScrollView(slivers: [
+                      if (selected == null && line == null && filterStop == null) SliverToBoxAdapter(child: _searchArea()),
+                      ..._content(),
+                      // The floating Directions button must not hide the last row.
+                      SliverToBoxAdapter(
+                        child: SizedBox(
+                            height: 24 + MediaQuery.paddingOf(context).bottom + (_stopDirections != null ? kFabRoom : 0)),
+                      ),
+                    ]),
+                  ),
                 ),
               ),
             ),
+            // Stop view: Directions to the stop, floating at the bottom
+            // right of the sheet. Not at the sheet's lowest height, where
+            // it would sit on the stop's name.
+            if (_stopDirections case final dest? when sheetValue != M3EBottomSheetValue.preview)
+              Positioned(
+                right: (MediaQuery.sizeOf(context).width - math.min(MediaQuery.sizeOf(context).width, kSheetMaxWidth)) / 2 + 16,
+                bottom: MediaQuery.paddingOf(context).bottom + 16,
+                child: M3EExtendedFab(
+                  label: context.l10n.directions,
+                  icon: const Icon(Icons.directions_rounded),
+                  controller: _directionsFab,
+                  appear: true,
+                  onPressed: () => _setDestination(dest),
+                ),
+              ),
           ]),
         ),
       ),
@@ -2208,7 +2282,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   /// Zoomed out on the stops view: the sheet holds just the search bar.
-  bool get _onlySearchBar => selected == null && to == null && line == null && zoomedOut;
+  bool get _onlySearchBar => selected == null && to == null && line == null && filterStop == null && zoomedOut;
 
   List<Widget> _content() {
     if (line case final l?) {
@@ -2218,16 +2292,16 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         color: Theme.of(context).colorScheme.primary,
         liveBuses: _lineTopics.topics.isEmpty ? null : tracker.buses.length,
         certainty: l.live?.certainty ?? _trackedCertainty(l.trip?.realtime ?? false, MotisClient.rawTripId(l.tripId)),
-        onBack: _closeLine,
+        onBack: _goBack,
         onSwitchDirection: _otherDirection() == null ? null : () => _loadLineTrip(_otherDirection()!),
-        onStopTap: (stop) => map?.animateCamera(CameraUpdate.newLatLngZoom(stop.position, 16.5)),
+        onStopTap: _openLineStop,
         bus: tracker.buses[MotisClient.rawTripId(l.tripId)]?.vehicle,
         others: [for (final b in tracker.buses.values) b.vehicle],
       );
     }
     if (selected != null) return _tripSlivers(selected!);
     if (to != null) return _routeSlivers();
-    if (zoomedOut) return const []; // only the search bar
+    if (zoomedOut && filterStop == null) return const []; // only the search bar
     return _nearbySlivers();
   }
 
@@ -2238,66 +2312,92 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         ),
       );
 
-  List<Widget> _nearbySlivers() {
-    return [
-      SliverToBoxAdapter(
-        child: SheetSectionHeader(
-          filterStop != null
-              ? context.l10n.departuresFrom
-              : areaMode
-                  ? context.l10n.departuresInArea
-                  : here == null
-                      ? context.l10n.departuresNearTermini
-                      : context.l10n.departuresNearYou,
-          trailing: nearbyLoading && nearby.isNotEmpty
-              ? const SizedBox(width: 24, height: 24, child: M3ELoadingIndicator(size: 24))
-              : null,
-        ),
-      ),
-      if (filterStop case final stop?)
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 12, 4),
-            child: Row(children: [
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: M3EChip(
-                    label: '${titleCase(stop.name)} · ${stop.code}',
-                    type: M3EChipType.input,
-                    selected: true,
-                    leading: const Icon(Icons.place_rounded),
-                    onPressed: () => map?.animateCamera(CameraUpdate.newLatLngZoom(stop.position, 17)),
-                    onDeleted: _clearFilter,
-                  ),
-                ),
-              ),
-              // Favourite this exact stop (same store as the stars in search).
-              ListenableBuilder(
-                listenable: favorites,
-                builder: (context, _) {
-                  final place = Place(
-                    name: titleCase(stop.name),
-                    position: stop.position,
-                    kind: PlaceKind.stop,
-                    stopId: stop.id,
-                  );
-                  final fav = favorites.isFavorite(place);
-                  return M3EIconButton(
-                    icon: Icon(
-                      fav ? Icons.star_rounded : Icons.star_outline_rounded,
-                      color: fav ? Theme.of(context).colorScheme.primary : null,
-                    ),
-                    tooltip: fav ? context.l10n.removeFavourite : context.l10n.addFavourite,
-                    variant: M3EIconButtonVariant.standard,
-                    onPressed: () {
-                      HapticFeedback.selectionClick();
-                      favorites.toggle(place);
-                    },
-                  );
-                },
+  /// Top of the stop view: back to the view it was opened from, the stop's
+  /// name, number and distance, and its star. Directions float at the
+  /// bottom of the sheet (see [_stopDirections]).
+  Widget _stopHeader(Stop stop) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final away = here == null ? null : distanceMeters(here!, stop.position);
+    final place = Place(name: titleCase(stop.name), position: stop.position, kind: PlaceKind.stop, stopId: stop.id);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          M3EIconButton(
+            icon: const Icon(Icons.arrow_back_rounded),
+            tooltip: context.l10n.back,
+            variant: M3EIconButtonVariant.standard,
+            onPressed: _goBack,
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(titleCase(stop.name),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: emphasized(context).titleMedium.copyWith(color: cs.onSurface)),
+              Text(
+                [context.l10n.stopNumber(stop.code), if (away != null) _distanceLabel(away)].join(' · '),
+                style: tt.labelMedium?.copyWith(color: cs.onSurfaceVariant),
               ),
             ]),
+          ),
+          if (nearbyLoading && nearby.isNotEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8),
+              child: SizedBox(width: 24, height: 24, child: M3ELoadingIndicator(size: 24)),
+            ),
+          // Favourite this exact stop (same store as the stars in search).
+          ListenableBuilder(
+            listenable: favorites,
+            builder: (context, _) {
+              final fav = favorites.isFavorite(place);
+              return M3EIconButton(
+                icon: Icon(fav ? Icons.star_rounded : Icons.star_outline_rounded, color: fav ? cs.primary : null),
+                tooltip: fav ? context.l10n.removeFavourite : context.l10n.addFavourite,
+                variant: M3EIconButtonVariant.standard,
+                onPressed: () {
+                  HapticFeedback.selectionClick();
+                  favorites.toggle(place);
+                },
+              );
+            },
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  /// Where the floating Directions button of the stop view goes: the stop,
+  /// when it's not where you are; else null (no button).
+  Place? get _stopDirections {
+    final stop = filterStop, me = here;
+    if (stop == null || line != null || to != null || me == null) return null;
+    if (distanceMeters(me, stop.position) <= kStopDirectionsMeters) return null;
+    return Place(name: titleCase(stop.name), position: stop.position, kind: PlaceKind.stop, stopId: stop.id);
+  }
+
+  /// "650 m", "1.2 km" (in the app's language).
+  String _distanceLabel(double meters) => meters < 1000
+      ? context.l10n.distanceMeters(meters.round())
+      : context.l10n.distanceKm((meters / 1000).toStringAsFixed(1).replaceAll('.', context.l10n.decimalSeparator));
+
+  List<Widget> _nearbySlivers() {
+    return [
+      if (filterStop case final stop?)
+        SliverToBoxAdapter(child: _stopHeader(stop))
+      else
+        SliverToBoxAdapter(
+          child: SheetSectionHeader(
+            areaMode
+                ? context.l10n.departuresInArea
+                : here == null
+                    ? context.l10n.departuresNearTermini
+                    : context.l10n.departuresNearYou,
+            trailing: nearbyLoading && nearby.isNotEmpty
+                ? const SizedBox(width: 24, height: 24, child: M3ELoadingIndicator(size: 24))
+                : null,
           ),
         ),
       if (error != null) _errorBox(error!),
@@ -2635,3 +2735,7 @@ class _PointerShield extends StatelessWidget {
     return Stack(children: [Positioned.fill(child: shield), c]);
   }
 }
+
+/// What the sheet shows: the plain map's departures, one stop's, the
+/// journeys to a destination, or a line.
+enum _View { browse, stop, journeys, line }

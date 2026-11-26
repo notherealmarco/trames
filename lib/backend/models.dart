@@ -1,5 +1,7 @@
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import 'line_style.dart';
+
 /// Backend-neutral models. Every backend maps its own JSON into these.
 ///
 /// Trip ids are always the *raw GTFS trip_id of the operator feed*
@@ -284,6 +286,9 @@ class LegAlternative {
   Leg get ride => legs.firstWhere((l) => l.transit);
   String get line => ride.routeShortName ?? ride.mode;
 
+  /// [line] as shown (its friendly name).
+  String get label => ride.label;
+
   /// Whether the ride can still be caught leaving [now] (walking to its stop
   /// first, a minute of slack). The planner also lists earlier trips that
   /// would have made the connection: buses that may have left already.
@@ -307,6 +312,8 @@ class Leg {
     required this.points,
     required this.distanceMeters,
     this.routeShortName,
+    this.routeColor,
+    this.routeTextColor,
     this.headsign,
     this.tripId,
     this.backendTripId,
@@ -336,6 +343,11 @@ class Leg {
   final List<LatLng> points;
   final double distanceMeters;
   final String? routeShortName;
+
+  /// The line's colours as the planner says (GTFS hex), when it does; see
+  /// [colors] for what is shown.
+  final String? routeColor;
+  final String? routeTextColor;
   final String? headsign;
 
   /// Raw GTFS trip_id (see top of file).
@@ -345,6 +357,14 @@ class Leg {
   /// for more about it, e.g. its full path.
   final String? backendTripId;
   final bool realtime;
+
+  /// What the ride is shown as: its line's friendly name, else its line,
+  /// else its mode.
+  String get label => routeShortName == null ? mode : lineName(routeShortName!, id: backendTripId);
+
+  /// The ride's colours (see line_style.dart).
+  LineColors get colors =>
+      lineColors(mode: mode, line: routeShortName, color: routeColor, textColor: routeTextColor, id: backendTripId);
   /// Departure delay at the boarding stop (live minus scheduled).
   final int? delaySeconds;
 
@@ -415,6 +435,8 @@ class Leg {
       points: points,
       distanceMeters: distanceMeters,
       routeShortName: routeShortName,
+      routeColor: routeColor,
+      routeTextColor: routeTextColor,
       headsign: headsign,
       tripId: tripId,
       backendTripId: backendTripId,
@@ -473,8 +495,14 @@ class Departure {
     this.origin,
     this.certainty,
     this.stopId,
+    this.routeColor,
+    this.routeTextColor,
   });
   final DateTime time;
+
+  /// Its line's colours as the backend says (GTFS hex), when it does.
+  final String? routeColor;
+  final String? routeTextColor;
 
   /// Backend id of the stop it leaves from (a station board mixes several).
   final String? stopId;
@@ -496,7 +524,9 @@ class Departure {
       backendTripId: backendTripId,
       origin: origin,
       certainty: certainty,
-      stopId: stopId);
+      stopId: stopId,
+      routeColor: routeColor,
+      routeTextColor: routeTextColor);
   final bool realtime;
   final int? delaySeconds;
   final String? tripId;
@@ -513,6 +543,13 @@ class BoardRow {
   final String mode;
   final String headsign;
   final List<Departure> next;
+
+  /// [line] as shown (its friendly name).
+  String get label => lineName(line, id: stop.id);
+
+  /// The line's colours (see line_style.dart).
+  LineColors get colors => lineColors(
+      mode: mode, line: line, color: next.firstOrNull?.routeColor, textColor: next.firstOrNull?.routeTextColor, id: stop.id);
 }
 
 class Vehicle {
@@ -528,10 +565,14 @@ class Vehicle {
     this.stopSequence,
     this.backendTripId,
     this.stopId,
+    this.mode = 'BUS',
   });
 
   final String id;
   final String label;
+
+  /// BUS, TRAM, ... (see [modeOfRouteType]).
+  final String mode;
 
   /// The trip in Transitous form (to load its route and stops), when known.
   final String? backendTripId;
@@ -637,9 +678,15 @@ class TripInfo {
     required this.stops,
     required this.realtime,
     this.directionId,
+    this.routeColor,
+    this.routeTextColor,
   });
   final String line;
   final String mode;
+
+  /// Its line's colours as the backend says (GTFS hex), when it does.
+  final String? routeColor;
+  final String? routeTextColor;
   final String headsign;
   final List<LatLng> points;
   final List<TripStop> stops;

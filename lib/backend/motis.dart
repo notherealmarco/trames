@@ -280,6 +280,8 @@ class MotisClient implements TripPlanner, OnBoardPlanner, PlaceSearch, StopBoard
           : decodePolyline(geom['points'] as String, precision: geom['precision'] as int? ?? 6),
       distanceMeters: (j['distance'] as num?)?.toDouble() ?? (geom?['length'] as num?)?.toDouble() ?? 0,
       routeShortName: _line(j),
+      routeColor: j['routeColor'] as String?,
+      routeTextColor: j['routeTextColor'] as String?,
       headsign: j['headsign'] as String?,
       tripId: rawTripId(j['tripId'] as String?),
       backendTripId: j['tripId'] as String?,
@@ -372,6 +374,8 @@ class MotisClient implements TripPlanner, OnBoardPlanner, PlaceSearch, StopBoard
       headsign: ride['headsign'] as String? ?? '',
       directionId: int.tryParse('${ride['directionId']}'),
       realtime: ride['realTime'] as bool? ?? false,
+      routeColor: ride['routeColor'] as String?,
+      routeTextColor: ride['routeTextColor'] as String?,
       points: [
         for (final l in legs)
           if (l['legGeometry'] case final Map g) ...decodePolyline(g['points'] as String, precision: g['precision'] as int? ?? 6),
@@ -569,6 +573,8 @@ class MotisClient implements TripPlanner, OnBoardPlanner, PlaceSearch, StopBoard
           backendTripId: s['tripId'] as String?,
           origin: _origin(s['tripFrom']),
           stopId: place['stopId'] as String?,
+          routeColor: s['routeColor'] as String?,
+          routeTextColor: s['routeTextColor'] as String?,
         ),
       ));
     }

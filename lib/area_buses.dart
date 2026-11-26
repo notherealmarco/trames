@@ -10,7 +10,7 @@ import 'live_buses.dart';
 /// open). Follows one area topic, a bit larger than the view; panning out of
 /// it (or zooming far out of or into it) replaces it with the new area.
 class AreaBuses {
-  AreaBuses({required this.connection, required this.tracker, this.defaultColor = '#5C6BC0'});
+  AreaBuses({required this.connection, required this.tracker, this.defaultColor = kBusColor});
 
   final LiveConnection connection;
 

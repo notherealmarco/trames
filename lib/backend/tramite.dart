@@ -129,7 +129,13 @@ class TramiteClient {
     return _loading ??= () async {
       try {
         final list = await _get('/v1/sources') as List;
-        _prefixes = [for (final s in list.cast<Map<String, dynamic>>()) ?s['idPrefix'] as String?];
+        final sources = list.cast<Map<String, dynamic>>();
+        _prefixes = [for (final s in sources) ?s['idPrefix'] as String?];
+        lineOverrides.set({
+          for (final s in sources)
+            if (s['idPrefix'] case final String p)
+              p: [for (final o in (s['routes'] as List? ?? const []).cast<Map<String, dynamic>>()) RouteOverride.fromJson(o)],
+        });
       } catch (_) {
         // unreachable: Transitous only, retried later
       } finally {
@@ -199,9 +205,11 @@ class TramiteClient {
     return line == null ? null : rideLabel(line, j['tripShortName'] as String?, j['tripId'] as String?);
   }
 
-  /// A Tramite vehicle as the app's [Vehicle], with its line colour.
+  /// A Tramite vehicle as the app's [Vehicle], with its line colour
+  /// ("#RRGGBB", see line_style.dart).
   static ({Vehicle vehicle, String? color}) parseVehicle(Map<String, dynamic> j) {
-    final color = j['routeColor'] as String?;
+    final mode = modeOfRouteType(j['routeType'] as int?);
+    final line = j['routeShortName'] as String?;
     return (
       vehicle: Vehicle(
         id: j['id'] as String,
@@ -215,8 +223,15 @@ class TramiteClient {
         directionId: j['directionId'] as int?,
         stopSequence: j['currentStopSequence'] as int?,
         stopId: j['stopId'] as String?,
+        mode: mode,
       ),
-      color: color == null || color.isEmpty ? null : '#$color',
+      color: lineColors(
+              mode: mode,
+              line: line,
+              color: j['routeColor'] as String?,
+              textColor: j['routeTextColor'] as String?,
+              id: j['tripId'] as String? ?? j['routeId'] as String?)
+          .color,
     );
   }
 
@@ -253,6 +268,8 @@ class TramiteClient {
               stopId: from['stopId'] as String,
               position: LatLng((from['lat'] as num).toDouble(), (from['lon'] as num).toDouble())),
       certainty: certaintyOf(s, time.difference(sched)),
+      routeColor: s['routeColor'] as String?,
+      routeTextColor: s['routeTextColor'] as String?,
     );
     Vehicle? bus;
     if (v != null && v['lat'] != null && v['timestamp'] != null) {
@@ -267,10 +284,11 @@ class TramiteClient {
         bearing: (v['bearing'] as num?)?.toDouble(),
         directionId: s['directionId'] as int?,
         stopSequence: v['currentStopSequence'] as int?,
+        mode: modeOfRouteType(s['routeType'] as int?),
       );
     }
     return TramiteRow(
-      item: (line: line, mode: _mode(s['routeType'] as int?), headsign: s['headsign'] as String? ?? '', departure: departure),
+      item: (line: line, mode: modeOfRouteType(s['routeType'] as int?), headsign: s['headsign'] as String? ?? '', departure: departure),
       scheduled: sched,
       inferred: s['departureTimestampReason'] == 'INFERRED',
       cancelled: s['cancelled'] == true,
@@ -337,15 +355,6 @@ class TramiteClient {
     final v = s['vehicle'] as Map<String, dynamic>?;
     return v?['started'] == true ? Certainty.moving : Certainty.waiting;
   }
-
-  /// GTFS route_type as MOTIS mode names (what the app has icons for).
-  static String _mode(int? type) => switch (type) {
-        0 || 900 => 'TRAM',
-        1 || 401 => 'SUBWAY',
-        2 || 100 || 106 => 'RAIL',
-        4 || 1200 => 'FERRY',
-        _ => 'BUS',
-      };
 }
 
 /// One stop time from Tramite.

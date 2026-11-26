@@ -144,17 +144,25 @@ class SheetLoading extends StatelessWidget {
   }
 }
 
-/// Line pill: mode icon + short name on the leg color.
+/// Line pill: mode icon + short name on the line's color.
 class LinePill extends StatelessWidget {
-  const LinePill({super.key, required this.line, required this.mode, required this.color, this.large = false});
+  const LinePill({super.key, required this.line, required this.mode, required this.color, this.textColor, this.large = false});
   final String line;
   final String mode;
   final Color color;
+
+  /// Text and icon color; by default white or black, whichever reads better.
+  final Color? textColor;
   final bool large;
+
+  /// The pill of a line with [colors] (see line_style.dart).
+  factory LinePill.of({Key? key, required String line, required String mode, required LineColors colors, bool large = false}) =>
+      LinePill(key: key, line: line, mode: mode, color: hexColor(colors.color), textColor: hexColor(colors.text), large: large);
 
   @override
   Widget build(BuildContext context) {
-    final fg = ThemeData.estimateBrightnessForColor(color) == Brightness.dark ? Colors.white : Colors.black;
+    final fg = textColor ??
+        (ThemeData.estimateBrightnessForColor(color) == Brightness.dark ? Colors.white : Colors.black);
     final style = (large ? emphasized(context).titleLarge : emphasized(context).labelLarge).copyWith(color: fg);
     return Container(
       padding: EdgeInsets.symmetric(horizontal: large ? 12 : 8, vertical: large ? 6 : 4),
@@ -258,11 +266,7 @@ class NearbyDepartureRow extends StatelessWidget {
       child: Row(children: [
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Icon(modeIcon(row.mode), size: 22, color: cs.primary),
-              const SizedBox(width: 6),
-              Text(row.line, style: emphasized(context).headlineSmall.copyWith(color: cs.onSurface, height: 1.1)),
-            ]),
+            LinePill.of(line: row.label, mode: row.mode, colors: row.colors, large: true),
             const SizedBox(height: 4),
             Row(children: [
               Icon(Icons.arrow_forward_rounded, size: 16, color: cs.onSurface),
@@ -458,16 +462,12 @@ class ItineraryRow extends StatelessWidget {
                   if (_optionsFor(i) case final opts? when opts.length > 1)
                     SplitLinePill(lines: opts, icon: modeIcon(it.legs[i].mode), color: colorFor(it, it.legs[i]))
                   else
-                    LinePill(
-                      line: it.legs[i].routeShortName ?? it.legs[i].mode,
-                      mode: it.legs[i].mode,
-                      color: colorFor(it, it.legs[i]),
-                    )
+                    LinePill.of(line: it.legs[i].label, mode: it.legs[i].mode, colors: it.legs[i].colors)
                 else if (it.walkOptions[i] case final buses? when buses.isNotEmpty)
                   // Walking chosen over a ride: "🚶 20 ╱ 3BUS", the buses are
                   // the swipe options for this stretch in the trip view.
                   SplitLinePill(
-                    lines: ['${it.legs[i].duration.inMinutes}', ...buses],
+                    lines: ['${it.legs[i].duration.inMinutes}', ...buses.map((b) => lineName(b))],
                     icon: Icons.directions_walk_rounded,
                     color: grey,
                     outlineFirst: true,
@@ -567,7 +567,7 @@ class LegRow extends StatelessWidget {
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              LinePill(line: leg.routeShortName ?? leg.mode, mode: leg.mode, color: color, large: true),
+              LinePill(line: leg.label, mode: leg.mode, color: color, textColor: hexColor(leg.colors.text), large: true),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(titleCase(leg.headsign ?? ''),
@@ -619,7 +619,7 @@ class RouteGroupRow extends StatelessWidget {
   /// replace it (from the planner's leg alternatives).
   static List<List<String>> _lineOptions(Itinerary it) => [
         for (final leg in it.transitLegs)
-          <String>{leg.routeShortName ?? leg.mode, for (final a in leg.alternatives) a.line}.toList(),
+          <String>{leg.label, for (final a in leg.alternatives) a.label}.toList(),
       ];
 
   @override

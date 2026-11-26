@@ -46,11 +46,6 @@ class TrackedBus {
   }
 }
 
-/// Map image name of the heading cone in [color] (a "#RRGGBB" hex).
-String coneImageName(String color) => 'cone-${color.replaceFirst('#', '').toUpperCase()}';
-
-/// Name of the badge image (see busBadgeImage) for buses of [color].
-String badgeImageName(String color) => 'badge-${color.replaceFirst('#', '').toUpperCase()}';
 
 /// Draws a set of buses on a GeoJSON map source, animating each from where
 /// it is to its newest position. Whoever follows the buses (a ride, a line,
@@ -176,12 +171,12 @@ class LiveBusTracker {
               },
               'properties': {
                 'id': id,
-                'line': b.vehicle.routeShortName ?? '',
+                'line': lineName(b.vehicle.routeShortName ?? '', id: b.vehicle.backendTripId),
                 'color': b.color,
-                'badge': badgeImageName(b.color),
+                'text': readableOn(b.color),
                 // Moving buses keep their line where badges would overlap.
                 'moving': b.vehicle.started,
-                if (b.heading case final h?) ...{'heading': h, 'cone': coneImageName(b.color)},
+                'heading': ?b.heading,
               },
             },
         ],

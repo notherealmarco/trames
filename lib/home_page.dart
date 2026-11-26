@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, setEquals;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
@@ -35,7 +35,6 @@ import 'swipe_slot.dart';
 const kMapStyleLight = 'https://tiles.openfreemap.org/styles/positron';
 const kMapStyleDark = 'https://tiles.openfreemap.org/styles/fiord';
 
-const kLegPalette = ['#D81B60', '#1E88E5', '#43A047', '#FB8C00', '#8E24AA', '#00897B'];
 const kWalkColor = '#9E9E9E';
 
 /// Sheet peek: drag handle + destination search bar.
@@ -314,10 +313,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     final it = selected!;
     // The bus you're on has moved: its ride starts where it is now.
     if (identical(now, v.current) && it.transitLegs.any((l) => l.onBoard)) _drawSelected(fit: false);
-    final colors = _legColors(it);
     tracker.show({
       for (final l in it.transitLegs)
-        if (_legTrips[l.tripId]?.bus case final bus?) l.tripId!: (vehicle: bus, color: colors[l.tripId] ?? _lineColor),
+        if (_legTrips[l.tripId]?.bus case final bus?) l.tripId!: (vehicle: bus, color: l.colors.color),
     });
     _drawApproach();
   }
@@ -434,26 +432,55 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   /// Every stop seen on the map so far, by id: where buses are heading.
   final Map<String, LatLng> _stopPositions = {};
 
-  /// Bus images already on the map (heading cones, badges), by image name
-  /// (one of each per color).
-  final Set<String> _busImages = {};
-
   Future<void> _drawBuses(String source, Map<String, dynamic> g) async {
     final m = map;
     if (m == null || !styleReady) return;
-    for (final f in (g['features'] as List).cast<Map<String, dynamic>>()) {
-      final props = f['properties'] as Map<String, dynamic>;
-      for (final (key, draw) in [('cone', busConeImage), ('badge', busBadgeImage)]) {
-        final name = props[key] as String?;
-        if (name == null || !_busImages.add(name)) continue;
-        try {
-          await m.addImage(name, await draw(hexColor(props['color'] as String)), false, 3);
-        } catch (_) {
-          _busImages.remove(name); // try again next frame
-        }
-      }
-    }
     await m.setGeoJsonSource(source, g);
+    if (source == 'area-buses') _checkCones();
+  }
+
+  /// Browsed buses showing their badge (the rest are dots), as the map
+  /// last placed them; null until known (every cone shown).
+  Set<String>? _badged;
+  bool _conesChecking = false, _conesCheckAgain = false;
+
+  /// Cones only on buses showing their badge. The map decides alone which
+  /// badges fit (see the area-buses-badge layer), so after it redraws or
+  /// moves we ask it which are on screen. One check at a time, and none
+  /// sooner than the map settles its placement: a cone can be a moment
+  /// late to follow a bus turning into a dot or back.
+  Future<void> _checkCones() async {
+    if (_conesChecking) {
+      _conesCheckAgain = true;
+      return;
+    }
+    _conesChecking = true;
+    try {
+      do {
+        _conesCheckAgain = false;
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        final m = map;
+        if (m == null || !styleReady || !mounted) return;
+        // Whole map (generous: the rect may be in physical pixels).
+        final size = MediaQuery.sizeOf(context) * 4;
+        final hits = await m.queryRenderedFeaturesInRect(Offset.zero & size, ['area-buses-badge'], null);
+        final ids = <String>{
+          for (final f in hits)
+            if ((f as Map)['properties']?['id'] ?? f['id'] case final Object id) '$id',
+        };
+        if (setEquals(ids, _badged)) continue;
+        _badged = ids;
+        await m.setLayerFilter('area-buses-cone', [
+          'all',
+          ['has', 'heading'],
+          if (ids.isEmpty) ['==', ['get', 'id'], ''] else ['match', ['get', 'id'], ids.toList(), true, false],
+        ]);
+      } while (_conesCheckAgain);
+    } catch (_) {
+      // try again on the next redraw
+    } finally {
+      _conesChecking = false;
+    }
   }
 
   /// The path a bus of the open line or the selected journey drives along:
@@ -490,7 +517,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     try {
       final view = await m.getVisibleRegion();
       if (!mounted || to != null || line != null) return;
-      areaBuses.defaultColor = _lineColor;
       areaBuses.show(view, m.cameraPosition?.zoom ?? 15);
     } catch (_) {}
   }
@@ -703,6 +729,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   /// Map stopped moving: after [kAreaIdleDelay] load what's in view.
   void _onCameraIdle() {
     setState(() {}); // the center button shows only when away from you
+    _checkCones();
     _updateAreaBuses();
     if (to != null || line != null) return; // the area list isn't shown
     idleDebounce?.cancel();
@@ -1019,7 +1046,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   // ---------- line view ----------
 
-  String get _lineColor => _hex(Theme.of(context).colorScheme.primary);
 
   /// Opens the line view for [name]. [tripId] (a tapped departure, in
   /// Transitous form) picks the direction to show; otherwise the first
@@ -1132,7 +1158,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     final stop = v.stopId;
     _openLine(
       name: name,
-      mode: 'BUS',
+      mode: v.mode,
       tripId: v.backendTripId,
       hint: stop == null ? null : (stopId: stop, at: DateTime.now()),
     );
@@ -1225,7 +1251,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     tracker.show({
       for (final b in state.buses)
         if (dir == null || b.vehicle.directionId == null || b.vehicle.directionId == dir || b.vehicle.backendTripId == state.tripId)
-          b.vehicle.tripId ?? b.vehicle.id: (vehicle: b.vehicle, color: _lineColor),
+          b.vehicle.tripId ?? b.vehicle.id: (vehicle: b.vehicle, color: state.colors.color),
     });
     tracker.refreshHeadings(); // the shown trip's path may be new
     _drawApproach();
@@ -1253,7 +1279,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   Future<void> _drawLine() async {
     if (!styleReady) return;
     final t = line?.trip;
-    final color = _lineColor;
+    final color = line?.colors.color;
     await map!.setGeoJsonSource(
         'line',
         _collection([
@@ -1329,6 +1355,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     const empty = {'type': 'FeatureCollection', 'features': []};
     final labelColor = _hex(Theme.of(context).colorScheme.onSurface);
     final haloColor = _hex(Theme.of(context).colorScheme.surface);
+    // One badge and one cone image for every bus, tinted per bus by the
+    // map. Added here, before any bus: images added while the map draws
+    // can come out with other images' pixels on Android.
+    await m.addImage(kBusBadgeImage, await busBadgeSdf(), true, 3);
+    await m.addImage(kBusConeImage, await busConeSdf(), true, 3);
     await m.addGeoJsonSource('nearby', empty, promoteId: 'id');
     for (final id in ['line', 'line-stops', 'approach', 'route', 'via', 'stops', 'endpoints', 'buses']) {
       await m.addGeoJsonSource(id, empty);
@@ -1424,12 +1455,21 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         const CircleLayerProperties(
             circleRadius: 9, circleColor: ['get', 'color'], circleStrokeColor: '#FFFFFF', circleStrokeWidth: 3),
         enableInteraction: false);
-    // Heading cones, under the bus circles: soft wedges in the bus color,
-    // turned with the map. Only buses whose heading is known have one.
+    // Heading cones, under the bus circles: see-through wedges in the bus
+    // color fading towards the tip, with soft sides, turned with the map. Only buses whose heading
+    // is known have one.
     for (final (source, size) in [('area-buses', 0.9), ('buses', 1.2)]) {
       await m.addSymbolLayer(source, '$source-cone',
           SymbolLayerProperties(
-            iconImage: ['get', 'cone'],
+            iconImage: kBusConeImage,
+            // Only the halo is drawn: with this width and blur it turns
+            // the image into the fade (see busConeSdf). The fill would
+            // be a solid wedge on top.
+            iconColor: 'rgba(0, 0, 0, 0)',
+            iconHaloColor: ['get', 'color'],
+            iconHaloWidth: coneHaloWidth(size),
+            iconHaloBlur: coneHaloBlur(size),
+            iconOpacity: kConeOpacity,
             iconRotate: ['get', 'heading'],
             iconRotationAlignment: 'map',
             iconPitchAlignment: 'map',
@@ -1451,13 +1491,17 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         minzoom: AreaBuses.minZoom);
     await m.addSymbolLayer('area-buses', 'area-buses-badge',
         const SymbolLayerProperties(
-          iconImage: ['get', 'badge'],
+          iconImage: kBusBadgeImage,
+          iconColor: ['get', 'color'],
+          // The white ring.
+          iconHaloColor: '#FFFFFF',
+          iconHaloWidth: kBusBadgeRing,
           iconPadding: 0,
           symbolSortKey: ['case', ['get', 'moving'], 0, 1],
           textField: ['get', 'line'],
           textFont: ['Noto Sans Bold'],
           textSize: 9,
-          textColor: '#FFFFFF',
+          textColor: ['get', 'text'],
           // The badge decides: the line on it goes wherever it goes.
           textAllowOverlap: true,
           textIgnorePlacement: true,
@@ -1487,7 +1531,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           textField: ['get', 'line'],
           textFont: ['Noto Sans Bold'],
           textSize: 11,
-          textColor: '#FFFFFF',
+          textColor: ['get', 'text'],
           textAllowOverlap: true,
           textIgnorePlacement: true,
         ),
@@ -1535,21 +1579,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         ]));
   }
 
-  Map<String, String> _legColors(Itinerary it) {
-    final colors = <String, String>{};
-    var i = 0;
-    for (final l in it.transitLegs) {
-      colors[l.tripId ?? 'leg$i'] = kLegPalette[i % kLegPalette.length];
-      i++;
-    }
-    return colors;
-  }
-
-  String _colorHexFor(Itinerary it, Leg leg) {
-    if (!leg.transit) return kWalkColor;
-    final idx = it.transitLegs.toList().indexOf(leg);
-    return kLegPalette[idx % kLegPalette.length];
-  }
+  /// A leg's color: its line's (see line_style.dart), grey for walking.
+  String _colorHexFor(Itinerary it, Leg leg) => leg.transit ? leg.colors.color : kWalkColor;
 
   Color _colorFor(Itinerary it, Leg leg) => hexColor(_colorHexFor(it, leg));
 
@@ -1955,23 +1986,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (!isFrom && q.length <= 6 && !q.contains(' ') && backend.trips != null && tramite.prefixes.isNotEmpty) {
       final found = await Future.wait([
         for (final p in tramite.prefixes)
-          tramite
-              .lineVehicles(TramiteClient.lineId(p, q))
-              .then((buses) => (id: TramiteClient.lineId(p, q), buses: buses))
+          // A friendly name ("MA") finds its line ("MEA").
+          if (TramiteClient.lineId(p, lineOverrides.lineOfFriendlyName(p, q) ?? q) case final id)
+            tramite.lineVehicles(id).then((buses) => (id: id, buses: buses))
               .catchError((Object _) => (id: '', buses: <({Vehicle vehicle, String? color})>[])),
       ]);
       if (c.text.trim() != q) return items;
       for (final (:id, :buses) in found) {
         if (buses.isEmpty) continue;
-        final name = buses.first.vehicle.routeShortName ?? q;
-        final color = buses.first.color;
+        final first = buses.first.vehicle;
+        final name = first.routeShortName ?? q;
+        final colors = lineColors(mode: first.mode, line: name, id: id, color: buses.first.color);
         items.add(ListTile(
-          leading: LinePill(line: name, mode: 'BUS', color: color == null ? cs.primary : hexColor(color)),
-          title: Text(l.lineName(name)),
+          leading: LinePill.of(line: lineName(name, id: id), mode: first.mode, colors: colors),
+          title: Text(l.lineName(lineName(name, id: id))),
           subtitle: Text(l.busesLive(buses.length)),
           onTap: () {
             c.closeView('');
-            _openLine(name: name, mode: 'BUS', lineId: id);
+            _openLine(name: name, mode: first.mode, lineId: id);
           },
         ));
       }
@@ -2087,10 +2119,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 map = c;
                 if (_lastFix case final f?) _showWebPuck(f); // a new map (e.g. dark mode)
                 styleReady = false;
-                _busImages.clear(); // a new map (e.g. dark mode) has none
+                _badged = null; // nor a cone filter
               },
               onStyleLoadedCallback: _onStyleLoaded,
               onCameraIdle: _onCameraIdle,
+              // Zooming changes which buses are dots: their cones follow.
+              onCameraMove: (_) => _checkCones(),
               // Keeps controller.cameraPosition (centre, zoom) current; the
               // area logic reads it after every move.
               trackCameraPosition: true,
@@ -2162,15 +2196,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               Positioned.fill(
                 // (The toolbar's own safeArea flag leaves it under the status bar.)
                 child: SafeArea(
-                  child: OnBoardBar(line: ride.line, mode: ride.mode, headsign: ride.headsign, onLeave: _leaveBoard),
+                  child: OnBoardBar(line: lineName(ride.line), mode: ride.mode, headsign: ride.headsign, onLeave: _leaveBoard),
                 ),
               )
             else if (_boardQuestion case final q?)
               Positioned.fill(
                 child: SafeArea(
                   child: BoardQuestionBar(
-                  line: q.vehicle.routeShortName ?? '',
-                  mode: 'BUS',
+                  line: lineName(q.vehicle.routeShortName ?? '', id: q.vehicle.backendTripId),
+                  mode: q.vehicle.mode,
                   onYes: () => _answerBoarding(true),
                   onNo: () => _answerBoarding(false),
                   ),
@@ -2292,7 +2326,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       return lineSlivers(
         context,
         l,
-        color: Theme.of(context).colorScheme.primary,
+        color: hexColor(l.colors.color),
         liveBuses: _lineTopics.topics.isEmpty ? null : tracker.buses.length,
         certainty: l.live?.certainty ?? _trackedCertainty(l.trip?.realtime ?? false, MotisClient.rawTripId(l.tripId)),
         onBack: _goBack,
@@ -2533,7 +2567,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     const SizedBox(width: 6),
                     Flexible(
                       child: Text(
-                        context.l10n.hiddenJourneyReason(hidden[j].hiddenBecause!.line,
+                        context.l10n.hiddenJourneyReason(lineName(hidden[j].hiddenBecause!.line),
                             hm(hidden[j].hiddenBecause!.arrival), hidden[j].hiddenBecause!.changesSaved),
                         style: Theme.of(context).textTheme.labelMedium?.copyWith(color: cs.onSurfaceVariant),
                       ),
@@ -2673,7 +2707,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               for (var k = 0; k < v.variantCount(slot); k++)
                 v.isWalk(slot, k)
                     ? context.l10n.swipeWalk(v.walkDurationOf(slot).inMinutes)
-                    : '${v.rideOf(slot, k).routeShortName ?? v.rideOf(slot, k).mode} ${hm(v.rideOf(slot, k).start)}',
+                    : '${v.rideOf(slot, k).label} ${hm(v.rideOf(slot, k).start)}',
             ],
             onChanged: (k) => _swapRide(slot, k),
             child: row,

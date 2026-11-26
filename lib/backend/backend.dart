@@ -12,6 +12,7 @@ export 'cities.dart';
 export 'models.dart';
 export 'on_board.dart';
 export 'place_finder.dart' show PlaceLocator;
+export 'line_style.dart';
 export 'tramite.dart';
 export 'trip_numbers.dart';
 

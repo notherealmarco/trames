@@ -15,6 +15,13 @@ class LineState {
   /// The line in Tramite (e.g. "it-Lazio-Rome_85"), when it has it.
   String? lineId;
 
+  /// The line's colours (see line_style.dart).
+  LineColors get colors => lineColors(
+      mode: mode, line: name, color: trip?.routeColor, textColor: trip?.routeTextColor, id: lineId ?? tripId);
+
+  /// [name] as shown (its friendly name).
+  String get label => lineName(name, id: lineId ?? tripId);
+
   /// Trip shown (route + stops); one per direction, see [directions].
   String? tripId;
   TripInfo? trip;
@@ -91,7 +98,7 @@ List<Widget> lineSlivers(
             onPressed: onBack,
           ),
           const SizedBox(width: 4),
-          LinePill(line: s.name, mode: s.mode, color: color, large: true),
+          LinePill.of(line: s.label, mode: s.mode, colors: s.colors, large: true),
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
